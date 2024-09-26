@@ -9,6 +9,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-scripts": "5.0.1",
+    "recordrtc": "^5.6.2",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
@@ -23,6 +24,7 @@
       "react-app/jest"
     ]
   },
+  "proxy": "https://1c95-35-234-14-56.ngrok-free.app",
   "browserslist": {
     "production": [
       ">0.2%",
