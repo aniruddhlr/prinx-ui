@@ -1,123 +1,106 @@
-import React, { useState, useEffect, useRef } from 'react';
-import io from 'socket.io-client';
+import React, { useState, useEffect } from 'react';
 import RecordRTC, { StereoAudioRecorder } from 'recordrtc';
-import './SpeechRecognizer.css'; // Import CSS
 
-function SpeechRecognizer() {
-    const [transcription, setTranscription] = useState('');
+// Helper function to get audio stream and media recorder
+const getAudioStream = async () => {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        return stream;
+    } catch (err) {
+        console.error("Error accessing microphone:", err);
+        throw err;
+    }
+};
+
+const SpeechRecognizer = () => {
     const [isRecording, setIsRecording] = useState(false);
-    const socketRef = useRef(null);
-    const recorderRef = useRef(null);
-    const streamRef = useRef(null);
+    const [transcript, setTranscript] = useState('');
+    const [socket, setSocket] = useState(null);
+    const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [chunks, setChunks] = useState([]);
 
-    // Initialize WebSocket connection and listen for transcription updates
-    useEffect(() => {
-        const socket = io('https://1c95-35-234-14-56.ngrok-free.app'
-            , {
-                extraHeaders: {
-                    'ngrok-skip-browser-warning': 'true'
-                },
-                reconnectionAttempts: 5,  // Try reconnecting 5 times if disconnected
-                reconnectionDelay: 1000   // Wait 1 second before each reconnection attempt
-            }
-        );
-        socketRef.current = socket;
-
-        socket.on('transcription', (data) => {
-            setTranscription((prev) => prev + ' ' + data); // Append transcription
-        });
-
-        return () => {
-            socket.disconnect(); // Cleanup WebSocket on component unmount
-        };
-    }, []);
-
-    // Handle sending audio data to the server
-    const buffer = [];
-
-    const handleAudioData = (audioBlob) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const audioData = reader.result.split(',')[1]; // Base64-encoded audio data
-            buffer.push(audioData); // Add to buffer
-
-            if (buffer.length > 0 && socketRef.current) {
-                socketRef.current.emit('audio_data', buffer.shift()); // Send from buffer
-            }
-        };
-        reader.readAsDataURL(audioBlob);
-    };
-
-
-    // Start recording audio
-    const startRecording = async () => {
+    const handleStartRecording = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true, // Helps reduce background noise
-                    noiseSuppression: true, // Suppresses background noise
-                    // sampleRate: 16000, // Set sample rate to match Vosk's requirements
-                    autoGainControl: true
-                }
-            });
-            streamRef.current = stream;
+            const audioStream = await getAudioStream();
 
-            const recorder = new RecordRTC(stream, {
-                type: 'audio',
-                mimeType: 'audio/wav',
-                sampleRate: 44100,
-                desiredSampRate: 16000,
-                recorderType: StereoAudioRecorder,
-                numberOfAudioChannels: 1,  // Set to mono channel
-                timeSlice: 2000,  // Send audio data every second
-                ondataavailable: (audioBlob) => {
-                    handleAudioData(audioBlob);
-                }
-            });
+            // Start WebSocket connection
+            const ws = new WebSocket('ws://localhost:9090');
+            setSocket(ws);
 
-            recorderRef.current = recorder;
-            recorder.startRecording();
-            setIsRecording(true);
-            console.log('Started recording audio stream.');
+            ws.onopen = () => {
+                console.log('WebSocket connection opened');
+                setIsRecording(true);
+
+                // Start recording audio when WebSocket is open
+                const recorder = new MediaRecorder(audioStream, { mimeType: 'audio/wav' });
+                recorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        setChunks((prev) => [...prev, e.data]);
+                    }
+                };
+
+                recorder.start(1000); // Send data in 1 second chunks
+                setMediaRecorder(recorder);
+            };
+
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                if (message.segments) {
+                    const newText = message.segments.map(segment => segment.text).join(' ');
+                    setTranscript((prevTranscript) => `${prevTranscript} ${newText}`);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket connection closed');
+                setIsRecording(false);
+                if (mediaRecorder) {
+                    mediaRecorder.stop();
+                }
+            };
+
         } catch (error) {
-            console.error('Error accessing microphone:', error);
+            console.error("Error starting recording:", error);
         }
     };
 
-
-    // Stop recording audio
-    const stopRecording = () => {
-        if (recorderRef.current) {
-            recorderRef.current.stopRecording(); // No need for callback here
-            console.log('Stopped recording audio stream.');
+    const handleStopRecording = () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            setMediaRecorder(null);
         }
 
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach((track) => track.stop()); // Stop microphone access
+        if (socket) {
+            socket.close();
         }
-
         setIsRecording(false);
     };
 
+    useEffect(() => {
+        // Send audio data to server when recording
+        if (chunks.length && socket) {
+            chunks.forEach((chunk) => {
+                socket.send(chunk);
+            });
+            setChunks([]);
+        }
+    }, [chunks, socket]);
+
     return (
-        <div className="speech-recognizer">
-            <div className="transcription-box">
-                <h2>Transcription:</h2>
-                <p>{transcription}</p>
-            </div>
-            <div className="button-container">
-                {!isRecording ? (
-                    <button className="record-button" onClick={startRecording}>
-                        Start Recording
-                    </button>
-                ) : (
-                    <button className="stop-button" onClick={stopRecording}>
-                        Stop Recording
-                    </button>
-                )}
+        <div style={{ padding: '20px' }}>
+            <h1>Live Transcription</h1>
+            <button onClick={handleStartRecording} disabled={isRecording}>Start Recording</button>
+            <button onClick={handleStopRecording} disabled={!isRecording}>Stop Recording</button>
+            <h2>Transcript:</h2>
+            <div style={{ border: '1px solid black', padding: '10px', minHeight: '200px' }}>
+                {transcript}
             </div>
         </div>
     );
-}
+};
 
 export default SpeechRecognizer;
